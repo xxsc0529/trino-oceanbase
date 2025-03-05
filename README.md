@@ -17,7 +17,7 @@ There plugin files should be under the `target` directory.
 Firstly, start a trino Docker container.
 
 ```shell
-docker run --name trino -d trinodb/trino:433
+docker run --name trino -d trinodb/trino:468
 ```
 
 Create `log.properties`.
@@ -44,7 +44,7 @@ Patch plugin and config files to container and restart container.
 
 ```shell
 # add plugin files
-docker cp trino-oceanbase-433 trino:/data/trino/plugin/oceanbase
+docker cp trino-oceanbase-468 trino:/data/trino/plugin/oceanbase
 
 # add log config file
 docker cp log.properties trino:/etc/trino

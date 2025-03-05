@@ -35,7 +35,6 @@ import io.trino.plugin.jdbc.LongReadFunction;
 import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectReadFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
-import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.StandardColumnMappings;
@@ -62,9 +61,6 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.JoinCondition;
-import io.trino.spi.connector.JoinStatistics;
-import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.type.CharType;
@@ -117,7 +113,6 @@ import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalDef
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRounding;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRoundingMode;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
-import static io.trino.plugin.jdbc.JdbcJoinPushdownUtil.implementJoinCostAware;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
@@ -365,15 +360,6 @@ public class OceanBaseClient
     }
 
     @Override
-    protected ResultSet getColumns(JdbcTableHandle tableHandle, DatabaseMetaData metadata)
-            throws SQLException
-    {
-        RemoteTableName remoteTableName = tableHandle.getRequiredNamedRelation().getRemoteTableName();
-        String schemaName = escapeObjectNameForMetadataQuery(remoteTableName.getSchemaName(), metadata.getSearchStringEscape()).orElse(null);
-        return metadata.getColumns(compatibleMode.isMySQLMode() ? schemaName : null, compatibleMode.isMySQLMode() ? null : schemaName, escapeObjectNameForMetadataQuery(remoteTableName.getTableName(), metadata.getSearchStringEscape()), null);
-    }
-
-    @Override
     protected String getColumnDefinitionSql(ConnectorSession session, ColumnMetadata column, String columnName)
     {
         if (column.getComment() != null) {
@@ -459,7 +445,7 @@ public class OceanBaseClient
             return false;
         }
         for (JdbcSortItem sortItem : sortOrder) {
-            Type sortItemType = sortItem.getColumn().getColumnType();
+            Type sortItemType = sortItem.column().getColumnType();
             if (sortItemType instanceof CharType || sortItemType instanceof VarcharType) {
                 return false;
             }
@@ -472,12 +458,12 @@ public class OceanBaseClient
     {
         return compatibleMode.isMySQLMode() ? Optional.of((query, sortItems, limit) -> {
             String orderBy = sortItems.stream().flatMap(sortItem -> {
-                String ordering = sortItem.getSortOrder().isAscending() ? "ASC" : "DESC";
-                String columnSorting = format("%s %s", quoted(sortItem.getColumn().getColumnName()), ordering);
-                return switch (sortItem.getSortOrder()) {
+                String ordering = sortItem.sortOrder().isAscending() ? "ASC" : "DESC";
+                String columnSorting = format("%s %s", quoted(sortItem.column().getColumnName()), ordering);
+                return switch (sortItem.sortOrder()) {
                     case ASC_NULLS_FIRST, DESC_NULLS_LAST -> Stream.of(columnSorting);
-                    case ASC_NULLS_LAST -> Stream.of(format("ISNULL(%s) ASC", quoted(sortItem.getColumn().getColumnName())), columnSorting);
-                    case DESC_NULLS_FIRST -> Stream.of(format("ISNULL(%s) DESC", quoted(sortItem.getColumn().getColumnName())), columnSorting);
+                    case ASC_NULLS_LAST -> Stream.of(format("ISNULL(%s) ASC", quoted(sortItem.column().getColumnName())), columnSorting);
+                    case DESC_NULLS_FIRST -> Stream.of(format("ISNULL(%s) DESC", quoted(sortItem.column().getColumnName())), columnSorting);
                 };
             }).collect(joining(", "));
             return format("%s ORDER BY %s LIMIT %s", query, orderBy, limit);
@@ -508,25 +494,13 @@ public class OceanBaseClient
     @Override
     protected boolean isSupportedJoinCondition(ConnectorSession session, JdbcJoinCondition joinCondition)
     {
-        if (joinCondition.getOperator() == JoinCondition.Operator.IS_DISTINCT_FROM) {
-            return false;
-        }
         return !compatibleMode.isMySQLMode() || Stream.of(joinCondition.getLeftColumn(), joinCondition.getRightColumn()).map(JdbcColumnHandle::getColumnType).noneMatch(type -> type instanceof CharType || type instanceof VarcharType);
-    }
-
-    @Override
-    public Optional<PreparedQuery> implementJoin(ConnectorSession session, JoinType joinType, PreparedQuery leftSource, PreparedQuery rightSource, List<JdbcJoinCondition> joinConditions, Map<JdbcColumnHandle, String> rightAssignments, Map<JdbcColumnHandle, String> leftAssignments, JoinStatistics statistics)
-    {
-        if (compatibleMode.isMySQLMode() && joinType == JoinType.FULL_OUTER) {
-            return Optional.empty();
-        }
-        return implementJoinCostAware(session, joinType, leftSource, rightSource, statistics, () -> super.implementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics));
     }
 
     @Override
     public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
     {
-        String jdbcTypeName = typeHandle.getJdbcTypeName().orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
+        String jdbcTypeName = typeHandle.jdbcTypeName().orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
 
         Optional<ColumnMapping> mapping = getForcedMappingToVarchar(typeHandle);
         if (mapping.isPresent()) {
@@ -540,9 +514,9 @@ public class OceanBaseClient
             case "bigint unsigned" -> Optional.of(StandardColumnMappings.decimalColumnMapping(createDecimalType(20)));
             case "date" -> Optional.of(dateColumnMapping());
             case "json" -> Optional.of(jsonColumnMapping());
-            case "enum", "set" -> Optional.of(defaultVarcharColumnMapping(typeHandle.getColumnSize().orElse(MYSQL_MODE_CHAR_MAX_LENGTH), false));
-            case "datetime" -> Optional.of(timestampColumnMapping(typeHandle.getRequiredColumnSize(), typeHandle.getDecimalDigits().orElse(0)));
-            default -> switch (typeHandle.getJdbcType()) {
+            case "enum", "set" -> Optional.of(defaultVarcharColumnMapping(typeHandle.columnSize().orElse(MYSQL_MODE_CHAR_MAX_LENGTH), false));
+            case "datetime" -> Optional.of(timestampColumnMapping(typeHandle.requiredColumnSize(), typeHandle.decimalDigits().orElse(0)));
+            default -> switch (typeHandle.jdbcType()) {
                 case Types.BIT -> Optional.of(booleanColumnMapping());
                 case Types.TINYINT -> Optional.of(tinyintColumnMapping());
                 case Types.SMALLINT -> Optional.of(smallintColumnMapping());
@@ -551,13 +525,13 @@ public class OceanBaseClient
                 case Types.REAL, TYPE_BINARY_FLOAT -> Optional.of(floatColumnMapping());
                 case Types.DOUBLE, TYPE_BINARY_DOUBLE -> Optional.of(doubleColumnMapping());
                 case Types.NUMERIC, Types.DECIMAL -> Optional.ofNullable(numericColumnMapping(session, typeHandle));
-                case Types.CHAR, Types.NCHAR -> Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), false));
-                case Types.VARCHAR, Types.NVARCHAR, Types.LONGVARCHAR -> Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), false));
+                case Types.CHAR, Types.NCHAR -> Optional.of(defaultCharColumnMapping(typeHandle.requiredColumnSize(), false));
+                case Types.VARCHAR, Types.NVARCHAR, Types.LONGVARCHAR -> Optional.of(defaultVarcharColumnMapping(typeHandle.requiredColumnSize(), false));
                 case Types.CLOB -> Optional.of(clobColumnMapping());
                 case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> Optional.of(varbinaryColumnMapping());
-                case Types.TIME -> Optional.of(timeColumnMapping(typeHandle.getRequiredColumnSize()));
+                case Types.TIME -> Optional.of(timeColumnMapping(typeHandle.requiredColumnSize()));
                 case Types.TIMESTAMP ->
-                        compatibleMode.isMySQLMode() ? Optional.of(timestampWithTimeZoneColumnMapping(typeHandle.getRequiredColumnSize(), typeHandle.getDecimalDigits().orElse(0))) : Optional.of(timestampColumnMapping(typeHandle.getRequiredColumnSize(), typeHandle.getDecimalDigits().orElse(0)));
+                        compatibleMode.isMySQLMode() ? Optional.of(timestampWithTimeZoneColumnMapping(typeHandle.requiredColumnSize(), typeHandle.decimalDigits().orElse(0))) : Optional.of(timestampColumnMapping(typeHandle.requiredColumnSize(), typeHandle.decimalDigits().orElse(0)));
                 default -> Optional.empty();
             };
         };
@@ -665,7 +639,7 @@ public class OceanBaseClient
 
     private ColumnMapping numericColumnMapping(ConnectorSession session, JdbcTypeHandle typeHandle)
     {
-        int precision = typeHandle.getRequiredColumnSize();
+        int precision = typeHandle.requiredColumnSize();
         if (precision == 0) {
             if (getDecimalRounding(session) == ALLOW_OVERFLOW) {
                 DecimalType decimalType = createDecimalType(Decimals.MAX_PRECISION, getDecimalDefaultScale(session));
@@ -674,7 +648,7 @@ public class OceanBaseClient
             return null;
         }
 
-        int decimalDigits = typeHandle.getRequiredDecimalDigits();
+        int decimalDigits = typeHandle.requiredDecimalDigits();
         int width = precision + max(-decimalDigits, 0);
         int scale = max(decimalDigits, 0);
 

@@ -27,7 +27,9 @@ import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcJoinPushdownSupportModule;
+import io.trino.plugin.jdbc.JdbcMetadataConfig;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
+import io.trino.plugin.jdbc.TimestampTimeZoneDomain;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.ptf.Query;
 import io.trino.spi.function.table.ConnectorTableFunction;
@@ -35,6 +37,7 @@ import io.trino.spi.function.table.ConnectorTableFunction;
 import java.util.Properties;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class OceanBaseClientModule
@@ -44,6 +47,8 @@ public class OceanBaseClientModule
     protected void setup(Binder binder)
     {
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(OceanBaseClient.class).in(Scopes.SINGLETON);
+        configBinder(binder).bindConfigDefaults(JdbcMetadataConfig.class, config -> config.setBulkListColumns(true));
+        newOptionalBinder(binder, TimestampTimeZoneDomain.class).setBinding().toInstance(TimestampTimeZoneDomain.UTC_ONLY);
         configBinder(binder).bindConfig(OceanBaseJdbcConfig.class);
         configBinder(binder).bindConfig(OceanBaseConfig.class);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
@@ -57,12 +62,10 @@ public class OceanBaseClientModule
     @ForBaseJdbc
     public ConnectionFactory createConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OceanBaseConfig obConfig, OpenTelemetry openTelemetry)
     {
-        return new DriverConnectionFactory(
-                new Driver(),
-                config.getConnectionUrl(),
-                getConnectionProperties(obConfig),
-                credentialProvider,
-                openTelemetry);
+        return DriverConnectionFactory.builder(new Driver(), config.getConnectionUrl(), credentialProvider)
+                .setConnectionProperties(getConnectionProperties(obConfig))
+                .setOpenTelemetry(openTelemetry)
+                .build();
     }
 
     public Properties getConnectionProperties(OceanBaseConfig config)

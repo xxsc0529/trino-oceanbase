@@ -20,6 +20,6 @@ public class OceanBasePlugin
 {
     public OceanBasePlugin()
     {
-        super("oceanbase", new OceanBaseClientModule());
+        super("oceanbase", OceanBaseClientModule::new);
     }
 }
